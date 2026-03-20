@@ -1,3 +1,4 @@
+# === ARQUIVO COMPLETO ATUALIZADO: quote_logic.py ===
 import html as html_lib
 import os
 import re
@@ -154,7 +155,6 @@ def extract_cnpj(text: str) -> str:
     if m:
         return format_cnpj(m.group(0))
     compact = digits_only(text)
-    # only if text is mostly a document-ish line
     if len(compact) == 14 and len(compact) >= max(8, len(normalize_spaces(text)) - 6):
         return format_cnpj(compact)
     return "não informado"
@@ -173,8 +173,6 @@ def normalize_product(raw_name: str, raw_size: str) -> str:
     return f"{base} 0,55x{size}m"
 
 
-
-
 def first_meaningful(*values: Any) -> str:
     for value in values:
         if value is None:
@@ -183,6 +181,7 @@ def first_meaningful(*values: Any) -> str:
         if text and text.lower() != "não informado":
             return text
     return ""
+
 
 def join_address(parts: List[str]) -> str:
     cleaned: List[str] = []
@@ -404,6 +403,24 @@ class QuoteBuilder:
 
     def parse_text(self, text: str) -> Dict[str, Any]:
         lines = preprocess_text(text)
+
+        # === FILTRO DE CABEÇALHOS/METADADOS (PRIORIDADE 1) ===
+        # Ignora linhas como "Orçamento nº XXXX", "Cotação nº XXXX" ou similares
+        # para resolver o bug crítico onde viravam nome do cliente.
+        # Colocado no INÍCIO da função conforme solicitado.
+        header_patterns = [
+            r"orçamento\s*n[º°]?\s*\d",
+            r"orcamento\s*n[º°]?\s*\d",
+            r"cotação\s*n[º°]?\s*\d",
+            r"cotacao\s*n[º°]?\s*\d",
+            r"orç\.?\s*n[º°]?\s*\d",
+            r"cot\.?\s*n[º°]?\s*\d",
+        ]
+        lines = [
+            line for line in lines
+            if not any(re.search(pat, line.lower()) for pat in header_patterns)
+        ]
+
         explicit_cnpj = extract_cnpj(text)
 
         data: Dict[str, Any] = {
