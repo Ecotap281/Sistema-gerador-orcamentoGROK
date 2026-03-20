@@ -284,6 +284,10 @@ def classify_customer_line(text: str) -> Dict[str, str]:
     raw = normalize_spaces(text)
     lower = raw.lower()
 
+    # === PROTEÇÃO DEFINITIVA CONTRA LINHA "Orçamento nº XXX" (resolve o problema crítico reportado) ===
+    if re.search(r"(?:orçamento|orcamento|cotação|cotacao)\s*(?:n[º°]?|número|numero)?\s*[:=]?\s*\d", lower):
+        return {}
+
     if re.match(r"^(cnpj|cpf|cpf/cnpj)\b", lower):
         found_doc, _ = extract_document_from_text(raw)
         if not found_doc:
@@ -440,11 +444,11 @@ class QuoteBuilder:
             "texto_original": text,
         }
 
-        # === EXTRAÇÃO DO NÚMERO CUSTOM ANTES DE QUALQUER FILTRO (ESSA É A MUDANÇA DEFINITIVA) ===
+        # === EXTRAÇÃO DO NÚMERO CUSTOM ANTES DE QUALQUER FILTRO (regex fortalecida para "Orçamento nº:1573") ===
         for i, line in enumerate(lines[:]):
             lower = line.lower()
             custom_match = re.search(
-                r"(?:orçamento|orcamento|orç|orc|número|numero|nº|n|num)?\s*(?:do|de)?\s*(?:orçamento|orcamento|orç|orc)?\s*[:=]?\s*(\d+)",
+                r"(?:orçamento|orcamento|orç|orc)?\s*(?:n[º°]?|número|numero|nº|n|num)?\s*[:=]?\s*(\d+)",
                 lower
             )
             if custom_match:
@@ -453,12 +457,10 @@ class QuoteBuilder:
                 del lines[i]
                 break
 
-        # Filtro de cabeçalhos (agora mais restrito)
+        # === FILTRO DE CABEÇALHOS/METADADOS (agora robusto - resolve o problema crítico aberto) ===
         header_patterns = [
-            r"orçamento\s*n[º°]?\s*\d",
-            r"orcamento\s*n[º°]?\s*\d",
-            r"cotação\s*n[º°]?\s*\d",
-            r"cotacao\s*n[º°]?\s*\d",
+            r"(?:orçamento|orcamento|orç|orc)\s*(?:n[º°]?|número|numero)?\s*[:=]?\s*\d",
+            r"(?:cotação|cotacao)\s*(?:n[º°]?|número|numero)?\s*[:=]?\s*\d",
             r"orç\.?\s*n[º°]?\s*\d",
             r"cot\.?\s*n[º°]?\s*\d",
         ]
@@ -507,7 +509,14 @@ class QuoteBuilder:
                 data["numero_cotacao"] = value
                 continue
 
-            value = extract_label_value(line, [r"endereço de entrega", r"endereco de entrega", r"endereço entrega", r"endereco entrega"])
+            value = extract_label_value(line, [
+                r"endereço de entrega",
+                r"endereco de entrega",
+                r"endereço entrega",
+                r"endereco entrega",
+                r"end\.?\s*entrega",   # NOVO - captura "End. entrega" do WhatsApp
+                r"end entrega",
+            ])
             if value is not None:
                 data["cliente_endereco_entrega"] = value
                 continue
