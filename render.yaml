@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: gerador-orcamentos
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: INITIAL_QUOTE_NUMBER
+        value: 1500
+      - key: COUNTER_FILE
+        value: /app/data/last_number.txt
+    disk:
+      name: orcamentos-disk
+      mountPath: /app/data
+      sizeGB: 1

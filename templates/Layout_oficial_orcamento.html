@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<style>
+@page { size: A4; margin: 11mm 11mm 12mm 11mm; }
+* { box-sizing: border-box; }
+body{
+    font-family: Arial, Helvetica, sans-serif;
+    font-size:12.8px;
+    color:#000;
+    margin:0;
+    line-height:1.35;
+}
+.page{ width:100%; }
+.header{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    border-bottom:1.8px solid #000;
+    padding-bottom:10px;
+    margin-bottom:14px;
+    gap:10px;
+}
+.header-left,.header-right{
+    width:26%;
+    height:82px;
+    display:flex;
+    align-items:center;
+}
+.header-left{ justify-content:flex-start; }
+.header-right{ justify-content:flex-end; }
+.header-center{
+    width:48%;
+    text-align:center;
+    line-height:1.35;
+    font-size:11.4px;
+}
+.header img{
+    max-width:100%;
+    max-height:74px;
+    width:auto;
+    height:auto;
+    object-fit:contain;
+}
+.title-row{
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-end;
+    margin:6px 0 12px 0;
+}
+.title{ font-size:24px; font-weight:700; letter-spacing:0.3px; }
+.meta{ text-align:right; font-size:12.2px; line-height:1.45; }
+.section-title{
+    font-weight:700;
+    font-size:13.4px;
+    margin:0 0 5px 0;
+}
+.client{
+    margin-bottom:12px;
+    line-height:1.55;
+    padding:0 0 2px 0;
+}
+.client strong{ display:inline-block; min-width:92px; }
+.table-wrap{ margin-top:4px; }
+table{
+    width:100%;
+    border-collapse:collapse;
+    margin-bottom:14px;
+}
+th{
+    border-top:1.6px solid #000;
+    border-bottom:1.6px solid #000;
+    border-left:1px solid #000;
+    border-right:1px solid #000;
+    padding:8px 8px;
+    text-align:left;
+    font-size:12.3px;
+    font-weight:700;
+}
+td{
+    border-bottom:1px solid #000;
+    border-left:1px solid #000;
+    border-right:1px solid #000;
+    padding:8px 8px;
+    font-size:12.3px;
+    vertical-align:middle;
+}
+.num{ text-align:right; white-space:nowrap; }
+.col-prod{ width:40%; }
+.col-qtd{ width:9%; }
+.col-unit{ width:13%; }
+.col-peso{ width:12%; }
+.col-m3{ width:10%; }
+.col-total{ width:16%; }
+.summary{
+    width:50%;
+    margin-left:auto;
+    margin-top:4px;
+}
+.summary table{ width:100%; margin-bottom:0; }
+.summary td{
+    border:none;
+    border-bottom:1px solid #000;
+    padding:5px 0;
+    font-size:12.6px;
+}
+.summary td:first-child{ padding-right:10px; }
+.summary .total-geral td{
+    border-top:1.8px solid #000;
+    border-bottom:1.8px solid #000;
+    padding:8px 0;
+    font-size:16px;
+    font-weight:700;
+    white-space:nowrap;
+}
+.payment{
+    margin-top:18px;
+    display:flex;
+    align-items:flex-start;
+    gap:16px;
+}
+.payment img{
+    width:118px;
+    height:118px;
+    object-fit:contain;
+    border:1px solid #000;
+    padding:4px;
+}
+.payment-title{
+    font-size:13.4px;
+    font-weight:700;
+    margin-bottom:6px;
+}
+.payment-text{ font-size:12.3px; line-height:1.55; }
+.obs{
+    margin-top:16px;
+    font-size:11.6px;
+    line-height:1.55;
+}
+.obs div{ margin-bottom:2px; }
+.footer{
+    text-align:center;
+    font-size:10.5px;
+    margin-top:18px;
+    border-top:1px solid #000;
+    padding-top:7px;
+}
+</style>
+</head>
+<body>
+<div class="page">
+<div class="header">
+  <div class="header-left"><img src="logo_GreenWall.png"></div>
+  <div class="header-center">
+    <strong>GREENWALL TAPUMES ECOLÓGICOS LTDA</strong><br>
+    CNPJ: 39.992.451/0001-98 &nbsp;&nbsp; I.E: 165/0194355<br>
+    Rua Aldemar Vieira de Oliveira, 281<br>
+    CEP: 94836-197 - Alvorada - RS<br>
+    Fone: 51 99717-2773 (Eduardo Cabral)<br>
+    E-mail: vendas@ecotaprs.com.br
+  </div>
+  <div class="header-right"><img src="logo_ecotap.png"></div>
+</div>
+
+<div class="title-row">
+  <div class="title">ORÇAMENTO</div>
+  <div class="meta">
+    Nº {{numero_orcamento}}<br>
+    Data: {{data}}
+  </div>
+</div>
+
+<div class="section-title">CLIENTE</div>
+<div class="client">
+  <div><strong>Nome:</strong> {{cliente_nome}}</div>
+  <div><strong>CPF/CNPJ:</strong> {{cliente_doc}}</div>
+  <div><strong>Endereço:</strong> {{cliente_endereco}}</div>
+  <div><strong>Validade:</strong> {{validade}}</div>
+</div>
+
+<div class="table-wrap">
+<table>
+<tr>
+  <th class="col-prod">Produto</th>
+  <th class="num col-qtd">Qtd</th>
+  <th class="num col-unit">Unit.</th>
+  <th class="num col-peso">Peso</th>
+  <th class="num col-m3">m³</th>
+  <th class="num col-total">Total</th>
+</tr>
+{{linhas_itens}}
+</table>
+</div>
+
+<div class="summary">
+<table>
+<tr><td>Subtotal:</td><td class="num">{{subtotal}}</td></tr>
+<tr><td>Frete:</td><td class="num">{{frete}}</td></tr>
+<tr><td>Desconto:</td><td class="num">{{desconto}}</td></tr>
+<tr class="total-geral"><td>TOTAL GERAL:</td><td class="num">{{total_geral}}</td></tr>
+</table>
+</div>
+
+<div class="payment">
+  <img src="qr_pix.png">
+  <div>
+    <div class="payment-title">FORMA DE PAGAMENTO</div>
+    <div class="payment-text">
+      Banco: Sicoob (756)<br>
+      Agência: 3288<br>
+      Conta Corrente: 49.144-6<br><br>
+      Nome: J F Bolzan Tapumes Ecologicos LTDA<br>
+      CNPJ: 39.992.451/0001-98<br><br>
+      <strong>Chave PIX:</strong><br>
+      financeiro@ecotaprs.com.br
+    </div>
+  </div>
+</div>
+
+<div class="obs">
+  {{observacoes_dinamicas}}
+  <div>- Pagamento sem desconto em até 6x no cartão.</div>
+  <div>- Produtos fabricados com plástico 100% reciclado</div>
+  <div>- Valores sujeitos a alteração sem aviso prévio</div>
+</div>
+
+<div class="footer">Este orçamento é válido por 7 dias. Agradecemos pela preferência.</div>
+</div>
+</body>
+</html>
