@@ -61,3 +61,12 @@ Aceita:
 - Sem disk persistente, o contador volta a se perder após redeploy.
 - Em produção, você pode migrar o contador para Postgres ou Redis.
 - O HTML oficial fica intacto. O sistema só substitui placeholders.
+
+
+## Melhorias aplicadas nesta versão
+- bloqueio de concorrência entre processos no contador de orçamento
+- proteção contra path traversal em `/arquivos`
+- validação de payload com respostas 400 em vez de 500
+- timezone fixo em `America/Sao_Paulo`
+- limite de tamanho de payload via `MAX_CONTENT_LENGTH_BYTES`
+- timeouts menores e logging nas consultas de CNPJ

@@ -1,14 +1,17 @@
-import json
 import os
 from pathlib import Path
-from flask import Flask, request, jsonify, send_file, render_template_string
-from weasyprint import HTML
-from quote_logic import QuoteBuilder
+
+from flask import Flask, jsonify, render_template_string, request, send_file
+from werkzeug.exceptions import HTTPException
+
+from quote_logic import QuoteBuilder, QuoteValidationError
 
 BASE_DIR = Path(__file__).resolve().parent
+GENERATED_DIR = BASE_DIR / "generated"
 TEMPLATE_HTML = (BASE_DIR / "templates" / "Layout_oficial_orcamento.html").read_text(encoding="utf-8")
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_CONTENT_LENGTH_BYTES", str(512 * 1024)))
 builder = QuoteBuilder(base_dir=BASE_DIR)
 
 FORM_HTML = """
@@ -43,13 +46,34 @@ FORM_HTML = """
 </html>
 """
 
+
 @app.get("/")
 def index():
     return render_template_string(FORM_HTML)
 
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.errorhandler(QuoteValidationError)
+def handle_quote_validation_error(error: QuoteValidationError):
+    return jsonify({"erro": str(error)}), 400
+
+
+@app.errorhandler(413)
+def handle_too_large(_error):
+    return jsonify({"erro": "payload excede o tamanho máximo permitido"}), 413
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(error: Exception):
+    if isinstance(error, HTTPException):
+        return error
+    app.logger.exception("Erro não tratado ao processar requisição", exc_info=error)
+    return jsonify({"erro": "erro interno ao processar o orçamento"}), 500
+
 
 @app.post("/gerar-orcamento")
 def gerar_orcamento():
@@ -65,31 +89,43 @@ def gerar_orcamento():
     html_path, pdf_path = builder.write_outputs(html, quote["numero_orcamento"])
 
     if download:
-        return send_file(pdf_path, mimetype="application/pdf", as_attachment=True, download_name=pdf_path.name)
+        return send_file(
+            pdf_path,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=pdf_path.name,
+            conditional=True,
+        )
 
-    return jsonify({
-        "numero_orcamento": quote["numero_orcamento"],
-        "cliente": quote["cliente"],
-        "resumo": quote["resumo"],
-        "arquivos": {
-            "html": str(html_path.name),
-            "pdf": str(pdf_path.name),
-        },
-        "download_pdf": f"/arquivos/{pdf_path.name}",
-        "download_html": f"/arquivos/{html_path.name}",
-    })
+    return jsonify(
+        {
+            "numero_orcamento": quote["numero_orcamento"],
+            "cliente": quote["cliente"],
+            "resumo": quote["resumo"],
+            "arquivos": {
+                "html": html_path.name,
+                "pdf": pdf_path.name,
+            },
+            "download_pdf": f"/arquivos/{pdf_path.name}",
+            "download_html": f"/arquivos/{html_path.name}",
+        }
+    )
+
 
 @app.get("/arquivos/<path:filename>")
-def arquivos(filename):
-    path = BASE_DIR / "generated" / filename
-    if not path.exists():
-        return jsonify({"erro": "arquivo não encontrado"}), 404
-    if path.suffix.lower() == ".pdf":
-        mimetype = "application/pdf"
-    else:
-        mimetype = "text/html"
-    return send_file(path, mimetype=mimetype, as_attachment=True, download_name=path.name)
+def arquivos(filename: str):
+    safe_path = builder.resolve_generated_file(filename)
+    mimetype = "application/pdf" if safe_path.suffix.lower() == ".pdf" else "text/html; charset=utf-8"
+    return send_file(
+        safe_path,
+        mimetype=mimetype,
+        as_attachment=True,
+        download_name=safe_path.name,
+        conditional=True,
+    )
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
+    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
     app.run(host="0.0.0.0", port=port, debug=False)
