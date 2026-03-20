@@ -18,30 +18,68 @@ FORM_HTML = """
   <meta charset="utf-8">
   <title>Gerador de Orçamentos</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body { font-family: Arial, Helvetica, sans-serif; max-width: 980px; margin: 24px auto; padding: 0 16px; }
-    textarea, input { width: 100%; padding: 12px; font-size: 16px; }
-    textarea { min-height: 260px; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }
-    button { padding: 12px 18px; font-size: 16px; cursor: pointer; }
-    .card { border: 1px solid #ddd; padding: 18px; border-radius: 12px; }
-    code { background: #f4f4f4; padding: 2px 6px; border-radius: 6px; }
-  </style>
+  <link rel="stylesheet" href="/static/ui.css">
 </head>
 <body>
-  <h1>Gerador de Orçamentos</h1>
-  <p>Cole o texto no estilo WhatsApp ou envie JSON para <code>POST /gerar-orcamento</code>.</p>
-  <div class="card">
-    <form method="post" action="/gerar-orcamento?download=1">
-      <textarea name="texto" placeholder="Cole aqui o texto do orçamento..."></textarea>
-      <div style="margin-top:16px;">
-        <button type="submit">Gerar PDF</button>
+  <main class="page">
+    <header class="header">
+      <div class="brand">
+        <div class="brand__mark" aria-hidden="true"></div>
+        <div class="brand__text">
+          <div class="brand__title">Gerador de Orçamentos</div>
+          <div class="brand__subtitle">Cole a mensagem e gere o PDF em 1 clique.</div>
+        </div>
       </div>
-    </form>
-  </div>
+      <div class="header__hint">
+        <span class="pill">Aceita variações: <strong>nº</strong>, <strong>num</strong>, <strong>:</strong>, <strong>=</strong>, <strong>_</strong>, com/sem acento</span>
+      </div>
+    </header>
+
+    <section class="card">
+      <form method="post" action="/gerar-orcamento?download=1" class="form" autocomplete="off">
+        <label for="texto" class="label">Texto do orçamento</label>
+        <textarea
+          id="texto"
+          name="texto"
+          class="textarea"
+          spellcheck="false"
+          placeholder="Cole aqui... (ex.: CNPJ, itens, frete, número do orçamento, etc.)"
+        ></textarea>
+
+        <div class="actions">
+          <button type="submit" class="btn btn--primary">
+            <span class="btn__dot" aria-hidden="true"></span>
+            Gerar PDF
+          </button>
+
+          <button type="button" class="btn btn--ghost" id="btn-clear">Limpar</button>
+        </div>
+
+        <div class="micro">
+          <div class="micro__left">
+            Dica: pode colar do WhatsApp - o sistema tenta interpretar "como humano".
+          </div>
+          <div class="micro__right">
+            API: <code>POST /gerar-orcamento</code>
+          </div>
+        </div>
+      </form>
+    </section>
+
+    <footer class="footer">
+      <div class="footer__line">
+        <span>PDF oficial não é alterado.</span>
+        <span class="sep">•</span>
+        <span>Interface feita sob medida.</span>
+      </div>
+    </footer>
+  </main>
+
+  <script src="/static/ui.js"></script>
 </body>
 </html>
 """
+
 
 @app.get("/")
 def index():

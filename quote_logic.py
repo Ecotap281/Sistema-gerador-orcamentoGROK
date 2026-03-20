@@ -425,8 +425,13 @@ class QuoteBuilder:
         }
 
     def parse_text(self, text: str) -> Dict[str, Any]:
-        lines = preprocess_text(text)
+        """Parse a free-form WhatsApp-like text into structured fields.
 
+        Goals:
+        - tolerant to accents, separators (: = -), underscores, and word order
+        - multiple fields can appear in the same line (e.g. frete + cotação)
+        """
+        lines = preprocess_text(text)
         explicit_cnpj = extract_cnpj(text)
 
         data: Dict[str, Any] = {
@@ -444,48 +449,49 @@ class QuoteBuilder:
             "texto_original": text,
         }
 
-        # === EXTRAÇÃO DO NÚMERO CUSTOM ANTES DE QUALQUER FILTRO ===
+        def _extract_money_keyword(line: str, keyword_re: str) -> Optional[Decimal]:
+            m = re.search(
+                rf"\b{keyword_re}\b\s*[:=\-]?\s*(?:r\$\s*)?([\d\.\,]+)",
+                line,
+                flags=re.IGNORECASE,
+            )
+            return d(m.group(1)) if m else None
+
+        def _extract_text_after_keyword(line: str, keyword_re: str) -> Optional[str]:
+            m = re.search(
+                rf"\b{keyword_re}\b\s*[:=\-]?\s*(.+)$",
+                line,
+                flags=re.IGNORECASE,
+            )
+            return normalize_spaces(m.group(1)) if m else None
+
+        # 1) Global scan (order-independent): orçamento + cotação
         for i, line in enumerate(lines[:]):
-            numero_orc = extract_orcamento_number_from_line(line)
-            if numero_orc:
-                data["numero_orcamento_custom"] = numero_orc
-                print(f"[QUOTE] Número custom detectado e removido da linha: {data['numero_orcamento_custom']}")
+            n = extract_orcamento_number_from_line(line)
+            if n:
+                data["numero_orcamento_custom"] = n
                 del lines[i]
                 break
 
-            if not data["numero_cotacao"]:
-                numero_cot = extract_cotacao_number_from_line(line)
-                if numero_cot:
-                    data["numero_cotacao"] = numero_cot
-                    print(f"[QUOTE] Cotação detectada no input: {data['numero_cotacao']}")
-                    del lines[i]
-                    break
+        for i, line in enumerate(lines[:]):
+            c = extract_cotacao_number_from_line(line)
+            if c:
+                data["numero_cotacao"] = c
+                del lines[i]
+                break
 
-        # === FILTRO DE CABEÇALHOS/METADADOS (agora robusto - resolve o problema crítico aberto) ===
-        header_patterns = [
-            r"(?:orçamento|orcamento|orç|orc)\s*(?:n[º°]?|número|numero)?\s*[:=]?\s*\d",
-            r"(?:cotação|cotacao)\s*(?:n[º°]?|número|numero)?\s*[:=]?\s*\d",
-            r"orç\.?\s*n[º°]?\s*\d",
-            r"cot\.?\s*n[º°]?\s*\d",
-        ]
-        lines = [
-            line for line in lines
-            if not any(re.search(pat, line.lower()) for pat in header_patterns)
-        ]
-
+        # 2) Main per-line parse (multiple fields per line)
         item_pattern = re.compile(
             r"(?P<qtd>\d+)\s+(?P<produto>tapumes?|telhas?)\s+(?P<medida>\d+[.,]?\d*)m?\b",
             re.I,
         )
 
         for line in lines:
+            line = normalize_spaces(line)
+            if not line:
+                continue
 
-            if not data["numero_cotacao"]:
-                numero_cot_inline = extract_cotacao_number_from_line(line)
-                if numero_cot_inline:
-                    data["numero_cotacao"] = numero_cot_inline
-            lower = line.lower()
-
+            # Products are "terminal" lines.
             m = item_pattern.search(line)
             if m:
                 data["items"].append({
@@ -494,73 +500,85 @@ class QuoteBuilder:
                 })
                 continue
 
-            value = extract_label_value(line, [r"frete"])
-            if value is not None:
-                parsed = extract_money_after_label(value) or extract_money_after_label(line)
-                if parsed is not None:
-                    data["frete"] = parsed
+            # Fields can co-exist in same line.
+            if not data["numero_orcamento_custom"]:
+                n = extract_orcamento_number_from_line(line)
+                if n:
+                    data["numero_orcamento_custom"] = n
 
-            value = extract_label_value(line, [r"valor negociado"])
-            if value is not None:
-                parsed = extract_money_after_label(value) or extract_money_after_label(line)
-                if parsed is not None:
-                    data["valor_negociado"] = parsed
+            if not data["numero_cotacao"]:
+                c = extract_cotacao_number_from_line(line)
+                if c:
+                    data["numero_cotacao"] = c
 
-            value = extract_label_value(line, [r"prazo de entrega"])
-            if value is not None:
-                data["prazo_entrega"] = value
+            if data["frete"] == Decimal("0"):
+                frete = _extract_money_keyword(line, r"frete")
+                if frete is not None:
+                    data["frete"] = frete
 
-            value = extract_label_value(line, [r"número da cotação", r"numero da cotação", r"numero da cotacao", r"cotação", r"cotacao"])
-            if value is not None:
-                data["numero_cotacao"] = value
+            if data["valor_negociado"] is None:
+                v = _extract_money_keyword(line, r"valor\s*negociad[oa]")
+                if v is not None:
+                    data["valor_negociado"] = v
 
-            value = extract_label_value(line, [
-                r"endereço de entrega",
-                r"endereco de entrega",
-                r"endereço entrega",
-                r"endereco entrega",
-                r"end\.?\s*entrega",   # NOVO - captura "End. entrega" do WhatsApp
-                r"end entrega",
-            ])
-            if value is not None:
-                data["cliente_endereco_entrega"] = value
-                continue
+            if data["prazo_entrega"] is None:
+                prazo = _extract_text_after_keyword(line, r"prazo\s*(?:de\s*)?entrega")
+                if prazo:
+                    data["prazo_entrega"] = prazo
 
-            value = extract_label_value(line, [r"endereço", r"endereco"])
-            if value is not None:
-                data["cliente_endereco"] = value
-                continue
+            if not data["cliente_endereco_entrega"]:
+                entrega = extract_label_value(
+                    line,
+                    [
+                        r"end(?:ere[cç]o)?\s*(?:de\s*)?entrega",
+                        r"end\.?\s*entrega",
+                    ],
+                )
+                if entrega is None:
+                    entrega = _extract_text_after_keyword(line, r"end(?:ere[cç]o)?\s*(?:de\s*)?entrega")
+                if entrega:
+                    data["cliente_endereco_entrega"] = entrega
 
-            value = extract_label_value(line, [r"nome", r"cliente"])
-            if value is not None:
-                customer_info = classify_customer_line(value)
+            if not data["cliente_endereco"]:
+                end_ = extract_label_value(line, [r"end(?:ere[cç]o)?"])
+                if end_ is None:
+                    end_ = _extract_text_after_keyword(line, r"end(?:ere[cç]o)?")
+                if end_ and not re.search(r"\b(entrega)\b", line, flags=re.IGNORECASE):
+                    data["cliente_endereco"] = end_
+
+            # Customer doc (CPF/CNPJ)
+            if not data["cliente_doc"]:
+                doc_val = extract_label_value(line, [r"cpf\s*/\s*cnpj", r"cpf", r"cnpj"])
+                if doc_val:
+                    doc_digits = digits_only(doc_val)
+                    if len(doc_digits) in (11, 14):
+                        data["cliente_doc"] = doc_digits
+
+            # Name / Customer line
+            if not data["cliente_nome"]:
+                name_val = extract_label_value(line, [r"nome", r"cliente"])
+                if name_val:
+                    customer_info = classify_customer_line(name_val)
+                else:
+                    customer_info = classify_customer_line(line)
+
                 if customer_info.get("cliente_nome") and not data["cliente_nome"]:
                     data["cliente_nome"] = customer_info["cliente_nome"]
                 if customer_info.get("cliente_doc") and not data["cliente_doc"]:
                     data["cliente_doc"] = customer_info["cliente_doc"]
-                continue
 
-            value = extract_label_value(line, [r"cnpj", r"cpf", r"cpf/cnpj"])
-            if value is not None:
-                customer_info = classify_customer_line(line)
-                if customer_info.get("cliente_doc") and not data["cliente_doc"]:
-                    data["cliente_doc"] = customer_info["cliente_doc"]
-                continue
-
-            customer_info = classify_customer_line(line)
-            if customer_info:
-                if customer_info.get("cliente_nome") and not data["cliente_nome"]:
-                    data["cliente_nome"] = customer_info["cliente_nome"]
-                if customer_info.get("cliente_doc") and not data["cliente_doc"]:
-                    data["cliente_doc"] = customer_info["cliente_doc"]
-                continue
-
+            # Raw address fallback
             if looks_like_address(line) and not data["cliente_endereco"]:
                 data["cliente_endereco"] = normalize_spaces(line)
-                continue
 
-            data["observacoes_adicionais"].append(line)
+            # Additional observations: keep human notes that are not pure headers.
+            if not looks_like_product_line(line):
+                if not extract_orcamento_number_from_line(line) and not extract_cotacao_number_from_line(line):
+                    # Avoid duplicating label-only lines that were already captured
+                    if not re.search(r"\b(frete|valor\s*negociad[oa]|prazo\s*(?:de\s*)?entrega)\b", line, re.I):
+                        data["observacoes_adicionais"].append(line)
 
+        # 3) Final fallbacks
         if not data["cliente_doc"] and explicit_cnpj != "não informado":
             data["cliente_doc"] = explicit_cnpj
 
@@ -569,7 +587,7 @@ class QuoteBuilder:
             _, cleaned = extract_document_from_text(first_line)
             cleaned = re.sub(r"\s*-\s*(cpf|cnpj)\b.*$", "", cleaned, flags=re.IGNORECASE).strip()
             if cleaned and not looks_like_address(cleaned) and not looks_like_product_line(cleaned):
-                if re.search(r'[a-zA-Z]', cleaned, re.IGNORECASE):
+                if re.search(r"[a-zA-Z]", cleaned):
                     data["cliente_nome"] = normalize_spaces(cleaned)
 
         data["cliente_doc"] = data["cliente_doc"] or "não informado"
@@ -577,7 +595,6 @@ class QuoteBuilder:
         data["cliente_endereco_entrega"] = normalize_spaces(data["cliente_endereco_entrega"]) or "não informado"
         data["cliente_nome"] = normalize_spaces(data["cliente_nome"])
         return data
-
     def build(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         text = normalize_spaces((payload.get("texto") or payload.get("mensagem") or "").strip())
         extracted = self.parse_text(text) if text else {
@@ -759,24 +776,31 @@ class QuoteBuilder:
         return html_path, pdf_path
 
 
+
+
 def extract_orcamento_number_from_line(line: str) -> Optional[str]:
     """
-    Extract the custom orçamento number only when the line explicitly refers to "orcamento/orçamento".
+    Extract the custom orçamento number only when the line explicitly refers to orçamento.
 
-    Accepts variants commonly pasted from WhatsApp:
-    - "numero orcamento: 1598"
-    - "numero_orcamento:1598"
-    - "num orcamento : 1605"
+    Accepted human formats (examples):
+    - "numero orcamento: 1573"
+    - "NUMERO_ORCAMENTO 1573"
     - "orçamento nº 1573"
-
-    Why: avoids mis-detecting CNPJ/CPF/phones as orçamento number.
+    - "orc n 1573"
+    - "orç. 1573"
     """
-    normalized = normalize_spaces(line).lower()
+    line = normalize_spaces(line)
+    if not line:
+        return None
 
     m = re.search(
-        r"\b(?:num(?:ero)?[\s_]+)?orc(?:amento|\.? )\b\s*"
-        r"(?:n[º°]?|nº|n)?\s*[:=]?\s*(\d{1,6})\b",
-        normalized,
+        r"\b(?:"
+        r"(?:numero|num|n)\s*[_\-\s]*\s*(?:do\s*)?"
+        r"orc(?:amento|\.)\b"
+        r"|"
+        r"orc(?:amento|\.)\b\s*(?:n[º°]?|nº|n|num(?:ero)?)?"
+        r")\s*[:=\-]?\s*(\d{1,6})\b",
+        line,
         flags=re.IGNORECASE,
     )
     return m.group(1) if m else None
@@ -784,22 +808,25 @@ def extract_orcamento_number_from_line(line: str) -> Optional[str]:
 
 def extract_cotacao_number_from_line(line: str) -> Optional[str]:
     """
-    Extract a cotação number only when the line explicitly refers to "cotacao/cotação".
+    Extract a cotação number only when the line explicitly refers to cotação.
 
-    Accepts:
-    - "Numero da Cotação 3339818 (HB transportes)"
-    - "Num Cotação: 3339818"
-    - "Frete: R$ 279,05 Numero da Cotação 3339818 (Transportes)"
+    Accepted human formats (examples):
+    - "numero da cotacao 3339818"
+    - "Cotação nº:3339818"
+    - "cot n 3339818"
     """
-    normalized = normalize_spaces(line).lower()
+    line = normalize_spaces(line)
+    if not line:
+        return None
 
     m = re.search(
-        r"\b(?:num(?:ero)?(?:\s+da)?[\s_]+)?cot(?:acao|ação)\b\s*"
-        r"(?:n[º°]?|nº|n)?\s*[:=]?\s*(\d{1,12})\b",
-        normalized,
+        r"\b(?:"
+        r"(?:numero|num|n)\s*[_\-\s]*\s*(?:da\s*)?"
+        r"cot(?:acao|ação|\.)\b"
+        r"|"
+        r"cot(?:acao|ação|\.)\b\s*(?:n[º°]?|nº|n|num(?:ero)?)?"
+        r")\s*[:=\-]?\s*(\d{1,12})\b",
+        line,
         flags=re.IGNORECASE,
     )
     return m.group(1) if m else None
-
-
-
