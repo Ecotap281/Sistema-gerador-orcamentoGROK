@@ -444,18 +444,22 @@ class QuoteBuilder:
             "texto_original": text,
         }
 
-        # === EXTRAÇÃO DO NÚMERO CUSTOM ANTES DE QUALQUER FILTRO (regex fortalecida para "Orçamento nº:1573") ===
+        # === EXTRAÇÃO DO NÚMERO CUSTOM ANTES DE QUALQUER FILTRO ===
         for i, line in enumerate(lines[:]):
-            lower = line.lower()
-            custom_match = re.search(
-                r"(?:orçamento|orcamento|orç|orc)?\s*(?:n[º°]?|número|numero|nº|n|num)?\s*[:=]?\s*(\d+)",
-                lower
-            )
-            if custom_match:
-                data["numero_orcamento_custom"] = custom_match.group(1)
+            numero_orc = extract_orcamento_number_from_line(line)
+            if numero_orc:
+                data["numero_orcamento_custom"] = numero_orc
                 print(f"[QUOTE] Número custom detectado e removido da linha: {data['numero_orcamento_custom']}")
                 del lines[i]
                 break
+
+            if not data["numero_cotacao"]:
+                numero_cot = extract_cotacao_number_from_line(line)
+                if numero_cot:
+                    data["numero_cotacao"] = numero_cot
+                    print(f"[QUOTE] Cotação detectada no input: {data['numero_cotacao']}")
+                    del lines[i]
+                    break
 
         # === FILTRO DE CABEÇALHOS/METADADOS (agora robusto - resolve o problema crítico aberto) ===
         header_patterns = [
@@ -752,3 +756,38 @@ class QuoteBuilder:
         html_path.write_text(html, encoding="utf-8")
         HTML(string=html, base_url=str(self.base_dir)).write_pdf(str(pdf_path))
         return html_path, pdf_path
+
+
+def extract_orcamento_number_from_line(line: str) -> Optional[str]:
+    """
+    Extract the custom orçamento number only when the line explicitly refers to "orcamento/orçamento".
+
+    Why: avoids mis-detecting CNPJ/CPF/phones as orçamento number.
+    """
+    normalized = normalize_spaces(line).lower()
+
+    m = re.search(
+        r"\b(?:numero\s+)?orc(?:amento|\.?)[\s]*"
+        r"(?:n[º°]?|nº|n|num(?:ero)?)?\s*[:=]?\s*(\d{1,6})\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    return m.group(1) if m else None
+
+
+def extract_cotacao_number_from_line(line: str) -> Optional[str]:
+    """
+    Extract a cotação number only when the line explicitly refers to "cotacao/cotação".
+    """
+    normalized = normalize_spaces(line).lower()
+
+    m = re.search(
+        r"\b(?:numero\s+)?cot(?:acao|ação)\b\s*"
+        r"(?:n[º°]?|nº|n|num(?:ero)?)?\s*[:=]?\s*(\d{1,10})\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    return m.group(1) if m else None
+
+
+
