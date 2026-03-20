@@ -423,7 +423,7 @@ class QuoteBuilder:
     def parse_text(self, text: str) -> Dict[str, Any]:
         lines = preprocess_text(text)
 
-        # Filtro de cabeçalhos (mantido)
+        # Filtro de cabeçalhos/metadados expandido para cobrir mais variações
         header_patterns = [
             r"orçamento\s*n[º°]?\s*\d",
             r"orcamento\s*n[º°]?\s*\d",
@@ -431,6 +431,14 @@ class QuoteBuilder:
             r"cotacao\s*n[º°]?\s*\d",
             r"orç\.?\s*n[º°]?\s*\d",
             r"cot\.?\s*n[º°]?\s*\d",
+            r"número\s*orcamento\s*\d",
+            r"numero\s*orcamento\s*\d",
+            r"número\s*orçamento\s*\d",
+            r"numero\s*orçamento\s*\d",
+            r"orçamento\s*\d",          # Novo: "ORÇAMENTO 1563"
+            r"orcamento\s*\d",
+            r"orç\s*\d",
+            r"orc\s*\d",
         ]
         lines = [
             line for line in lines
@@ -448,7 +456,7 @@ class QuoteBuilder:
             "valor_negociado": None,
             "prazo_entrega": None,
             "numero_cotacao": None,
-            "numero_orcamento_custom": None,   # NOVO
+            "numero_orcamento_custom": None,
             "items": [],
             "observacoes_adicionais": [],
             "texto_original": text,
@@ -470,14 +478,17 @@ class QuoteBuilder:
                 })
                 continue
 
-            # === NOVA EXTRAÇÃO: Número do Orçamento customizado ===
-            value = extract_label_value(line, [
-                r"número do orçamento", r"numero do orçamento", r"numero do orcamento",
-                r"nº do orçamento", r"n do orçamento", r"orçamento nº", r"orcamento nº"
-            ])
-            if value is not None:
-                data["numero_orcamento_custom"] = value
-                continue
+            # === EXTRAÇÃO ROBUSTA DE NÚMERO DO ORÇAMENTO CUSTOM ===
+            # Regex flexível para capturar variações reais do WhatsApp
+            # Exemplos cobertos: "NUMERO ORCAMENTO 1563", "ORÇAMENTO 1563", "Nº ORÇAMENTO: 9999", "Numero do Orcamento 1234", etc.
+            custom_match = re.search(
+                r"(?:número|numero|nº|n|num|no|orc|orç)?\s*(?:do|de)?\s*(?:orçamento|orcamento|orcament|orç)\s*[:=]?\s*(\d+)",
+                lower
+            )
+            if custom_match:
+                data["numero_orcamento_custom"] = custom_match.group(1)
+                print(f"[QUOTE] Número custom detectado: {data['numero_orcamento_custom']}")
+                continue  # Evita que a linha vire nome do cliente
 
             value = extract_label_value(line, [r"frete"])
             if value is not None:
@@ -576,7 +587,7 @@ class QuoteBuilder:
             "observacoes_adicionais": [],
         }
 
-        # === LÓGICA DE NÚMERO CUSTOMIZADO ===
+        # Lógica de número customizado (usa o extraído ou gera automático)
         numero_orcamento_custom = extracted.get("numero_orcamento_custom")
         if numero_orcamento_custom:
             digits = digits_only(numero_orcamento_custom)
