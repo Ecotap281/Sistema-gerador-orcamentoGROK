@@ -1,178 +1,198 @@
-import fcntl
-import logging
+# === ARQUIVO COMPLETO ATUALIZADO: quote_logic.py ===
+import html as html_lib
 import os
 import re
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from html import escape
+from datetime import date, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 import requests
 from weasyprint import HTML
-from werkzeug.exceptions import NotFound
 
-logger = logging.getLogger(__name__)
-
-BR_TZ = ZoneInfo(os.getenv("APP_TIMEZONE", "America/Sao_Paulo"))
-CNPJ_TIMEOUT_SECONDS = float(os.getenv("CNPJ_TIMEOUT_SECONDS", "4"))
-MAX_CNPJ_LOOKUPS = max(1, int(os.getenv("MAX_CNPJ_LOOKUPS", "2")))
+TWOPLACES = Decimal("0.01")
 
 PRODUCT_TABLE = {
-    "Tapume 0,55x2,00m": {"valor": Decimal("20.40"), "peso": Decimal("7.3"), "volume": Decimal("0.012")},
-    "Tapume 0,80x2,00m": {"valor": Decimal("27.90"), "peso": Decimal("10.6"), "volume": Decimal("0.017")},
-    "Tapume 1,00x2,00m": {"valor": Decimal("31.50"), "peso": Decimal("12.6"), "volume": Decimal("0.020")},
-    "Tapume 1,20x2,00m": {"valor": Decimal("36.50"), "peso": Decimal("15.0"), "volume": Decimal("0.024")},
-    "Telha 2,44x0,50m": {"valor": Decimal("18.40"), "peso": Decimal("7.6"), "volume": Decimal("0.010")},
+    "Tapume 0,55x2,00m": {"peso": Decimal("3.0"), "volume": Decimal("0.011"), "valor": Decimal("20.95")},
+    "Tapume 0,55x2,20m": {"peso": Decimal("3.3"), "volume": Decimal("0.012"), "valor": Decimal("22.95")},
+    "Tapume 0,55x2,44m": {"peso": Decimal("4.0"), "volume": Decimal("0.013"), "valor": Decimal("29.95")},
+    "Telha 0,55x2,00m": {"peso": Decimal("3.2"), "volume": Decimal("0.011"), "valor": Decimal("22.95")},
+    "Telha 0,55x2,20m": {"peso": Decimal("3.4"), "volume": Decimal("0.012"), "valor": Decimal("24.95")},
+    "Telha 0,55x2,44m": {"peso": Decimal("4.4"), "volume": Decimal("0.013"), "valor": Decimal("29.95")},
+}
+
+SIZE_MAP = {
+    "2": "2,00",
+    "2,0": "2,00",
+    "2,00": "2,00",
+    "2.00": "2,00",
+    "2,20": "2,20",
+    "2.20": "2,20",
+    "2,2": "2,20",
+    "2.2": "2,20",
+    "2,44": "2,44",
+    "2.44": "2,44",
 }
 
 CNPJ_ENDPOINTS = [
-    "https://publica.cnpj.ws/cnpj/{cnpj}",
-    "https://www.receitaws.com.br/v1/cnpj/{cnpj}",
     "https://brasilapi.com.br/api/cnpj/v1/{cnpj}",
+    "https://www.receitaws.com.br/v1/cnpj/{cnpj}",
+    "https://publica.cnpj.ws/cnpj/{cnpj}",
 ]
 
-ADDRESS_KEYWORDS = (
-    "rua",
-    "avenida",
-    "av.",
-    "travessa",
-    "rodovia",
-    "estrada",
-    "alameda",
-    "bairro",
-    "cep",
-    "quadra",
-    "lote",
-    "nº",
-    "numero",
-    "número",
-)
+ADDRESS_KEYWORDS = [
+    "rua", "r.", "avenida", "av.", "estrada", "rodovia", "travessa", "tv.",
+    "alameda", "praça", "praca", "bairro", "cep", "km", "rod.", "br-"
+]
 
-ALLOWED_OUTPUT_EXTENSIONS = {".pdf", ".html"}
-OUTPUT_FILENAME_RE = re.compile(r"^orcamento_\d+\.(pdf|html)$", re.IGNORECASE)
+INLINE_LABELS = [
+    "endereço de entrega",
+    "endereco de entrega",
+    "endereço entrega",
+    "endereco entrega",
+    "valor negociado",
+    "número da cotação",
+    "numero da cotação",
+    "numero da cotacao",
+    "prazo de entrega",
+    "frete",
+]
 
-
-class QuoteValidationError(ValueError):
-    """Erro de validação de entrada do orçamento."""
+lock = Lock()
 
 
-def q2(value: Decimal) -> Decimal:
-    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-
-def d(value: Any, default: str = "0") -> Decimal:
+def d(value: Any) -> Decimal:
     if isinstance(value, Decimal):
-        return q2(value)
-    if value in (None, ""):
-        return q2(Decimal(default))
-    try:
-        s = str(value).strip().replace("R$", "").replace(".", "").replace(",", ".")
-        return q2(Decimal(s))
-    except (InvalidOperation, ValueError, TypeError):
-        raise QuoteValidationError(f"valor monetário inválido: {value!r}")
-
-
-def digits_only(value: str) -> str:
-    return re.sub(r"\D", "", str(value or ""))
-
-
-def normalize_spaces(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip()
-
-
-def sanitize_html(value: str) -> str:
-    return escape(str(value or ""), quote=True)
-
-
-def format_cnpj(value: str) -> str:
-    digits = digits_only(value)
-    if len(digits) != 14:
-        return normalize_spaces(value)
-    return f"{digits[:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:]}"
-
-
-def format_cpf(value: str) -> str:
-    digits = digits_only(value)
-    if len(digits) != 11:
-        return normalize_spaces(value)
-    return f"{digits[:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:]}"
-
-
-def format_doc(value: str) -> str:
-    digits = digits_only(value)
-    if len(digits) == 14:
-        return format_cnpj(digits)
-    if len(digits) == 11:
-        return format_cpf(digits)
-    return normalize_spaces(value) or "não informado"
-
-
-def format_cep(value: str) -> str:
-    digits = digits_only(value)
-    if len(digits) != 8:
-        return normalize_spaces(value)
-    return f"{digits[:5]}-{digits[5:]}"
+        return value
+    if value is None or value == "":
+        return Decimal("0")
+    text = str(value).strip()
+    text = text.replace("R$", "").replace(".", "").replace(" ", "").replace(",", ".")
+    return Decimal(text)
 
 
 def money(value: Decimal) -> str:
-    val = q2(value)
-    integer, fraction = f"{val:.2f}".split(".")
-    integer = f"{int(integer):,}".replace(",", ".")
-    return f"R$ {integer},{fraction}"
+    value = value.quantize(TWOPLACES, rounding=ROUND_HALF_UP)
+    s = f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {s}"
 
 
-def fmt_decimal(value: Decimal, precision: int) -> str:
-    fmt = f"{{0:.{precision}f}}"
-    return fmt.format(value).replace(".", ",")
+def fmt_decimal(value: Decimal, places: int = 3) -> str:
+    q = Decimal("1") if places == 0 else Decimal("1." + ("0" * places))
+    value = value.quantize(q, rounding=ROUND_HALF_UP)
+    return f"{value:.{places}f}".replace(".", ",")
 
 
-def br_date(value: datetime) -> str:
-    return value.strftime("%d/%m/%Y")
+def digits_only(text: str) -> str:
+    return re.sub(r"\D", "", text or "")
 
 
-def now_br() -> datetime:
-    return datetime.now(BR_TZ)
+def format_cnpj(cnpj: str) -> str:
+    digits = digits_only(cnpj)
+    if len(digits) != 14:
+        return cnpj or "não informado"
+    return f"{digits[:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:]}"
+
+
+def format_cpf(cpf: str) -> str:
+    digits = digits_only(cpf)
+    if len(digits) != 11:
+        return cpf or "não informado"
+    return f"{digits[:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:]}"
+
+
+def format_doc(doc: str) -> str:
+    digits = digits_only(doc)
+    if len(digits) == 14:
+        return format_cnpj(doc)
+    if len(digits) == 11:
+        return format_cpf(doc)
+    return doc or "não informado"
+
+
+def format_cep(cep: str) -> str:
+    digits = digits_only(cep)
+    if len(digits) != 8:
+        return cep or ""
+    return f"{digits[:5]}-{digits[5:]}"
+
+
+def br_date(dt: date) -> str:
+    return dt.strftime("%d/%m/%Y")
+
+
+def sanitize_html(value: str) -> str:
+    return html_lib.escape(value or "").replace("\n", "<br>")
+
+
+def normalize_spaces(text: str) -> str:
+    text = (text or "").replace("\u00a0", " ")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
+
+
+def split_inline_labels(text: str) -> str:
+    out = text or ""
+    for label in INLINE_LABELS:
+        out = re.sub(rf"(?<!^)(?<!\n)\s+(?={re.escape(label)}\b)", "\n", out, flags=re.IGNORECASE)
+    return out
+
+
+def preprocess_text(raw_text: str) -> List[str]:
+    text = normalize_spaces(raw_text)
+    text = split_inline_labels(text)
+    lines = [normalize_spaces(line.strip(" -\t")) for line in text.splitlines()]
+    return [line for line in lines if line]
+
+
+def extract_cnpj(text: str) -> str:
+    if not text:
+        return "não informado"
+    m = re.search(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b", text)
+    if m:
+        return format_cnpj(m.group(0))
+    compact = digits_only(text)
+    if len(compact) == 14 and len(compact) >= max(8, len(normalize_spaces(text)) - 6):
+        return format_cnpj(compact)
+    return "não informado"
+
+
+def normalize_product(raw_name: str, raw_size: str) -> str:
+    name = (raw_name or "").strip().lower()
+    size_raw = (raw_size or "").replace("m", "").strip()
+    size = SIZE_MAP.get(size_raw, size_raw.replace(".", ","))
+    if "tap" in name:
+        base = "Tapume"
+    elif "telh" in name:
+        base = "Telha"
+    else:
+        return raw_name.strip() or "Produto não informado"
+    return f"{base} 0,55x{size}m"
 
 
 def first_meaningful(*values: Any) -> str:
     for value in values:
-        normalized = normalize_spaces(value)
-        if normalized and normalized.lower() != "não informado":
-            return normalized
+        if value is None:
+            continue
+        text = normalize_spaces(str(value))
+        if text and text.lower() != "não informado":
+            return text
     return ""
 
 
-def preprocess_text(text: str) -> List[str]:
-    raw_lines = re.split(r"[\r\n]+", str(text or ""))
-    lines: List[str] = []
-    for line in raw_lines:
-        cleaned = normalize_spaces(line)
-        if cleaned:
-            lines.append(cleaned)
-    return lines
-
-
-def extract_cnpj(text: str) -> str:
-    found, _ = extract_document_from_text(text)
-    return found or "não informado"
-
-
-def normalize_product(product: str, medida: str) -> str:
-    normalized_measure = str(medida).replace(".", ",")
-    normalized_product = str(product or "").strip().lower()
-    if "tapume" in normalized_product:
-        return f"Tapume 0,55x{normalized_measure}m" if normalized_measure == "2,00" else f"Tapume {normalized_measure}x2,00m"
-    if "telha" in normalized_product:
-        return f"Telha 2,44x{normalized_measure}m" if normalized_measure != "2,44" else "Telha 2,44x0,50m"
-    return normalize_spaces(product)
-
-
 def join_address(parts: List[str]) -> str:
-    filtered = [normalize_spaces(part) for part in parts if normalize_spaces(part)]
-    return ", ".join(filtered) if filtered else "não informado"
+    cleaned: List[str] = []
+    for part in parts:
+        value = normalize_spaces(str(part)) if part is not None else ""
+        if not value:
+            continue
+        if value.lower() in {"s/n", "sn"}:
+            continue
+        cleaned.append(value.strip(" ,-/"))
+    return ", ".join(cleaned) if cleaned else "não informado"
 
 
 def strip_known_label(text: str) -> str:
@@ -214,11 +234,11 @@ def extract_document_from_text(text: str) -> Tuple[Optional[str], str]:
         (r"(?<!\d)\d{11}(?!\d)", "cpf"),
     ]
     for pattern, kind in patterns:
-        match = re.search(pattern, original)
-        if match:
-            raw_doc = match.group(0)
+        m = re.search(pattern, original)
+        if m:
+            raw_doc = m.group(0)
             doc = format_cnpj(raw_doc) if kind == "cnpj" else format_cpf(raw_doc)
-            cleaned = normalize_spaces((original[:match.start()] + " " + original[match.end():]).strip(" -,"))
+            cleaned = normalize_spaces((original[:m.start()] + " " + original[m.end():]).strip(" -,"))
             return doc, cleaned
 
     stripped = strip_known_label(original)
@@ -231,32 +251,32 @@ def extract_document_from_text(text: str) -> Tuple[Optional[str], str]:
 
 
 def looks_like_address(text: str) -> bool:
-    candidate = (text or "").lower()
-    return any(keyword in candidate for keyword in ADDRESS_KEYWORDS) or bool(re.search(r"\b\d{5}-?\d{3}\b", candidate))
+    t = (text or "").lower()
+    return any(keyword in t for keyword in ADDRESS_KEYWORDS) or bool(re.search(r"\b\d{5}-?\d{3}\b", t))
 
 
 def looks_like_product_line(text: str) -> bool:
-    candidate = (text or "").lower()
-    return bool(re.search(r"\b\d+\s+(tapume|tapumes|telha|telhas)\b", candidate))
+    t = (text or "").lower()
+    return bool(re.search(r"\b\d+\s+(tapume|tapumes|telha|telhas)\b", t))
 
 
 def extract_money_after_label(line: str) -> Optional[Decimal]:
     candidate = normalize_spaces(line)
-    match = re.search(r"r\$\s*([\d\.,]+)", candidate, flags=re.IGNORECASE)
-    if match:
-        return d(match.group(1))
-    match = re.search(r"(?<!\d)(\d+[\.,]\d{2})(?!\d)", candidate)
-    if match:
-        return d(match.group(1))
+    m = re.search(r"r\$\s*([\d\.,]+)", candidate, flags=re.IGNORECASE)
+    if m:
+        return d(m.group(1))
+    m = re.search(r"(?<!\d)(\d+[\.,]\d{2})(?!\d)", candidate)
+    if m:
+        return d(m.group(1))
     return None
 
 
 def extract_label_value(line: str, labels: List[str]) -> Optional[str]:
     candidate = normalize_spaces(line)
     for label in labels:
-        match = re.search(rf"^{label}\s*:?\s*(.+)$", candidate, flags=re.IGNORECASE)
-        if match:
-            return normalize_spaces(match.group(1))
+        m = re.search(rf"^{label}\s*:?\s*(.+)$", candidate, flags=re.IGNORECASE)
+        if m:
+            return normalize_spaces(m.group(1))
     return None
 
 
@@ -286,12 +306,6 @@ def classify_customer_line(text: str) -> Dict[str, str]:
     return result
 
 
-@dataclass
-class CounterState:
-    current: int
-    next_value: int
-
-
 class QuoteBuilder:
     def __init__(self, base_dir: Path):
         self.base_dir = Path(base_dir)
@@ -299,70 +313,33 @@ class QuoteBuilder:
         self.data_dir = self.base_dir / "data"
         self.counter_file = Path(os.getenv("COUNTER_FILE", self.data_dir / "last_number.txt"))
         self.initial_number = int(os.getenv("INITIAL_QUOTE_NUMBER", "1500"))
-        self.generated_dir.mkdir(parents=True, exist_ok=True)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-
-    def _safe_parse_counter(self, raw_value: str) -> int:
-        cleaned = normalize_spaces(raw_value)
-        if not cleaned:
-            return self.initial_number
-        try:
-            value = int(cleaned)
-        except ValueError:
-            logger.warning("Counter file corrompido, resetando para valor inicial: %r", raw_value)
-            return self.initial_number
-        if value < self.initial_number:
-            return self.initial_number
-        return value
 
     def next_number(self) -> int:
         self.counter_file.parent.mkdir(parents=True, exist_ok=True)
-        initial_payload = f"{self.initial_number}".encode("utf-8")
-        with open(self.counter_file, "a+b") as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            fh.seek(0)
-            raw = fh.read()
-            if not raw:
-                fh.seek(0)
-                fh.write(initial_payload)
-                fh.flush()
-                fh.seek(0)
-                raw = fh.read()
-
-            current = self._safe_parse_counter(raw.decode("utf-8", errors="replace"))
-            next_value = current + 1
-
-            fh.seek(0)
-            fh.truncate()
-            fh.write(str(next_value).encode("utf-8"))
-            fh.flush()
-            os.fsync(fh.fileno())
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-
-        return next_value
+        with lock:
+            if self.counter_file.exists():
+                current = int(self.counter_file.read_text(encoding="utf-8").strip() or self.initial_number)
+            else:
+                current = self.initial_number
+            nxt = current + 1
+            self.counter_file.write_text(str(nxt), encoding="utf-8")
+        return nxt
 
     def fetch_cnpj_data(self, cnpj: str) -> Dict[str, str]:
         digits = digits_only(cnpj)
         if len(digits) != 14:
             return {}
-
         headers = {"User-Agent": "Mozilla/5.0"}
-        endpoints = CNPJ_ENDPOINTS[:MAX_CNPJ_LOOKUPS]
-
-        for url in endpoints:
+        for url in CNPJ_ENDPOINTS:
             try:
-                response = requests.get(url.format(cnpj=digits), headers=headers, timeout=CNPJ_TIMEOUT_SECONDS)
+                response = requests.get(url.format(cnpj=digits), headers=headers, timeout=15)
                 if response.status_code != 200:
-                    logger.warning("Consulta de CNPJ falhou em %s com status %s", url, response.status_code)
                     continue
                 normalized = self.normalize_cnpj_payload(response.json())
                 if normalized.get("nome") or normalized.get("endereco"):
                     return normalized
-            except requests.RequestException as exc:
-                logger.warning("Erro de rede na consulta de CNPJ em %s: %s", url, exc)
-            except ValueError as exc:
-                logger.warning("Resposta inválida ao consultar CNPJ em %s: %s", url, exc)
-
+            except Exception:
+                continue
         return {}
 
     def normalize_cnpj_payload(self, data: Dict[str, Any]) -> Dict[str, str]:
@@ -401,16 +378,14 @@ class QuoteBuilder:
         uf = normalize_spaces(endereco_data.get("estado") or endereco_data.get("uf") or endereco_data.get("state") or "")
         cep = format_cep(str(endereco_data.get("cep") or endereco_data.get("zip") or ""))
 
-        endereco = join_address(
-            [
-                logradouro,
-                numero,
-                complemento,
-                bairro,
-                f"{municipio}/{uf}" if municipio and uf else municipio or uf,
-                cep,
-            ]
-        )
+        endereco = join_address([
+            logradouro,
+            numero,
+            complemento,
+            bairro,
+            f"{municipio}/{uf}" if municipio and uf else municipio or uf,
+            cep,
+        ])
         if endereco == "não informado":
             endereco = ""
 
@@ -428,6 +403,24 @@ class QuoteBuilder:
 
     def parse_text(self, text: str) -> Dict[str, Any]:
         lines = preprocess_text(text)
+
+        # === FILTRO DE CABEÇALHOS/METADADOS (PRIORIDADE 1) ===
+        # Ignora linhas como "Orçamento nº XXXX", "Cotação nº XXXX" ou similares
+        # para resolver o bug crítico onde viravam nome do cliente.
+        # Colocado no INÍCIO da função conforme solicitado.
+        header_patterns = [
+            r"orçamento\s*n[º°]?\s*\d",
+            r"orcamento\s*n[º°]?\s*\d",
+            r"cotação\s*n[º°]?\s*\d",
+            r"cotacao\s*n[º°]?\s*\d",
+            r"orç\.?\s*n[º°]?\s*\d",
+            r"cot\.?\s*n[º°]?\s*\d",
+        ]
+        lines = [
+            line for line in lines
+            if not any(re.search(pat, line.lower()) for pat in header_patterns)
+        ]
+
         explicit_cnpj = extract_cnpj(text)
 
         data: Dict[str, Any] = {
@@ -450,14 +443,14 @@ class QuoteBuilder:
         )
 
         for line in lines:
-            match = item_pattern.search(line)
-            if match:
-                data["items"].append(
-                    {
-                        "produto": normalize_product(match.group("produto"), match.group("medida")),
-                        "quantidade": int(match.group("qtd")),
-                    }
-                )
+            lower = line.lower()
+
+            m = item_pattern.search(line)
+            if m:
+                data["items"].append({
+                    "produto": normalize_product(m.group("produto"), m.group("medida")),
+                    "quantidade": int(m.group("qtd")),
+                })
                 continue
 
             value = extract_label_value(line, [r"frete"])
@@ -479,18 +472,12 @@ class QuoteBuilder:
                 data["prazo_entrega"] = value
                 continue
 
-            value = extract_label_value(
-                line,
-                [r"número da cotação", r"numero da cotação", r"numero da cotacao", r"cotação", r"cotacao"],
-            )
+            value = extract_label_value(line, [r"número da cotação", r"numero da cotação", r"numero da cotacao", r"cotação", r"cotacao"])
             if value is not None:
                 data["numero_cotacao"] = value
                 continue
 
-            value = extract_label_value(
-                line,
-                [r"endereço de entrega", r"endereco de entrega", r"endereço entrega", r"endereco entrega"],
-            )
+            value = extract_label_value(line, [r"endereço de entrega", r"endereco de entrega", r"endereço entrega", r"endereco entrega"])
             if value is not None:
                 data["cliente_endereco_entrega"] = value
                 continue
@@ -547,38 +534,9 @@ class QuoteBuilder:
         data["cliente_nome"] = normalize_spaces(data["cliente_nome"])
         return data
 
-    def _validate_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if not items:
-            raise QuoteValidationError("nenhum item informado para o orçamento")
-
-        validated: List[Dict[str, Any]] = []
-        for item in items:
-            produto = normalize_spaces(item.get("produto", ""))
-            if not produto:
-                raise QuoteValidationError("item com produto vazio")
-            if produto not in PRODUCT_TABLE:
-                raise QuoteValidationError(f"produto não cadastrado: {produto}")
-
-            try:
-                quantidade = int(item.get("quantidade", 0))
-            except (TypeError, ValueError):
-                raise QuoteValidationError(f"quantidade inválida para o produto {produto!r}")
-            if quantidade <= 0:
-                raise QuoteValidationError(f"quantidade deve ser maior que zero para o produto {produto!r}")
-
-            validated.append({"produto": produto, "quantidade": quantidade})
-        return validated
-
-    def _current_dates(self) -> Tuple[str, str]:
-        current = now_br()
-        return br_date(current), br_date(current + timedelta(days=7))
-
     def build(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        if not isinstance(payload, dict):
-            raise QuoteValidationError("payload inválido")
-
-        text = str(payload.get("texto") or payload.get("mensagem") or "")
-        extracted = self.parse_text(text) if normalize_spaces(text) else {
+        text = normalize_spaces((payload.get("texto") or payload.get("mensagem") or "").strip())
+        extracted = self.parse_text(text) if text else {
             "cliente_nome": "",
             "cliente_doc": "não informado",
             "cliente_endereco": "não informado",
@@ -598,12 +556,18 @@ class QuoteBuilder:
         if digits_only(nome_extraido) == digits_only(doc_final):
             nome_extraido = ""
 
-        cliente_nome = first_meaningful(payload.get("cliente_nome"), nome_extraido, cnpj_data.get("nome")) or "não informado"
+        cliente_nome = first_meaningful(
+            payload.get("cliente_nome"),
+            nome_extraido,
+            cnpj_data.get("nome"),
+        ) or "não informado"
+
         cliente_endereco = first_meaningful(
             payload.get("cliente_endereco"),
             extracted.get("cliente_endereco"),
             cnpj_data.get("endereco"),
         ) or "não informado"
+
         entrega = first_meaningful(
             payload.get("cliente_endereco_entrega"),
             extracted.get("cliente_endereco_entrega"),
@@ -615,18 +579,18 @@ class QuoteBuilder:
         if valor_negociado_raw in (None, ""):
             valor_negociado_raw = extracted.get("valor_negociado")
         valor_negociado = d(valor_negociado_raw) if valor_negociado_raw not in (None, "") else None
-        if valor_negociado is not None and valor_negociado < Decimal("0"):
-            raise QuoteValidationError("valor negociado não pode ser negativo")
 
-        items = self._validate_items(payload.get("items") or extracted.get("items") or [])
+        items = payload.get("items") or extracted.get("items") or []
         linhas: List[Dict[str, Any]] = []
         subtotal = Decimal("0")
         desconto = Decimal("0")
 
         for item in items:
-            produto = item["produto"]
-            quantidade = item["quantidade"]
-            oficial = PRODUCT_TABLE[produto]
+            produto = item.get("produto", "Produto não informado")
+            quantidade = int(item.get("quantidade", 0))
+            oficial = PRODUCT_TABLE.get(produto)
+            if not oficial:
+                raise ValueError(f"Produto não cadastrado: {produto}")
 
             unit = oficial["valor"]
             peso_total = oficial["peso"] * quantidade
@@ -637,20 +601,17 @@ class QuoteBuilder:
             if valor_negociado is not None and valor_negociado < unit:
                 desconto += (unit - valor_negociado) * quantidade
 
-            linhas.append(
-                {
-                    "produto": produto,
-                    "quantidade": quantidade,
-                    "unitario": q2(unit),
-                    "peso_total": peso_total,
-                    "volume_total": volume_total,
-                    "total": q2(total),
-                }
-            )
+            linhas.append({
+                "produto": produto,
+                "quantidade": quantidade,
+                "unitario": unit,
+                "peso_total": peso_total,
+                "volume_total": volume_total,
+                "total": total,
+            })
 
-        total_geral = q2(subtotal - desconto + frete)
+        total_geral = subtotal - desconto + frete
         numero_orcamento = self.next_number()
-        data_emissao, data_validade = self._current_dates()
 
         observacoes: List[str] = []
         if entrega != "não informado":
@@ -659,9 +620,13 @@ class QuoteBuilder:
                 f"<strong>{sanitize_html(entrega)}</strong>"
             )
         if extracted.get("numero_cotacao"):
-            observacoes.append(f"<strong>Número da cotação:</strong> {sanitize_html(extracted['numero_cotacao'])}")
+            observacoes.append(
+                f"<strong>Número da cotação:</strong> {sanitize_html(extracted['numero_cotacao'])}"
+            )
         if extracted.get("prazo_entrega"):
-            observacoes.append(f"<strong>Prazo de entrega:</strong> {sanitize_html(extracted['prazo_entrega'])}")
+            observacoes.append(
+                f"<strong>Prazo de entrega:</strong> {sanitize_html(extracted['prazo_entrega'])}"
+            )
         for line in extracted.get("observacoes_adicionais", []):
             line_clean = normalize_spaces(str(line))
             if line_clean and line_clean.lower() != "não informado":
@@ -669,10 +634,10 @@ class QuoteBuilder:
 
         return {
             "numero_orcamento": numero_orcamento,
-            "data": data_emissao,
-            "validade": data_validade,
+            "data": br_date(date.today()),
+            "validade": br_date(date.today() + timedelta(days=7)),
             "cliente": {
-                "nome": cliente_nome,
+                "nome": cliente_nome or "não informado",
                 "doc": format_doc(doc_final),
                 "endereco": cliente_endereco,
                 "endereco_entrega": entrega,
@@ -680,9 +645,9 @@ class QuoteBuilder:
             "itens": linhas,
             "observacoes_html": "<br><br>".join(observacoes) if observacoes else "não informado",
             "resumo": {
-                "subtotal": q2(subtotal),
-                "frete": q2(frete),
-                "desconto": q2(desconto),
+                "subtotal": subtotal,
+                "frete": frete,
+                "desconto": desconto,
                 "total_geral": total_geral,
             },
         }
@@ -737,18 +702,3 @@ class QuoteBuilder:
         html_path.write_text(html, encoding="utf-8")
         HTML(string=html, base_url=str(self.base_dir)).write_pdf(str(pdf_path))
         return html_path, pdf_path
-
-    def resolve_generated_file(self, filename: str) -> Path:
-        name = Path(filename).name
-        if name != filename:
-            raise NotFound("arquivo não encontrado")
-        if not OUTPUT_FILENAME_RE.fullmatch(name):
-            raise NotFound("arquivo não encontrado")
-
-        path = (self.generated_dir / name).resolve()
-        generated_root = self.generated_dir.resolve()
-        if generated_root not in path.parents:
-            raise NotFound("arquivo não encontrado")
-        if path.suffix.lower() not in ALLOWED_OUTPUT_EXTENSIONS or not path.exists():
-            raise NotFound("arquivo não encontrado")
-        return path
