@@ -243,9 +243,9 @@ def extract_document_from_text(text: str) -> Tuple[Optional[str], str]:
 
     stripped = strip_known_label(original)
     compact = digits_only(stripped)
-    if len(compact) == 14 and compact:
+    if len(compact) == 14:
         return format_cnpj(compact), ""
-    if len(compact) == 11 and compact:
+    if len(compact) == 11:
         return format_cpf(compact), ""
     return None, original
 
@@ -286,6 +286,10 @@ def classify_customer_line(text: str) -> Dict[str, str]:
 
     if re.match(r"^(cnpj|cpf|cpf/cnpj)\b", lower):
         found_doc, _ = extract_document_from_text(raw)
+        if not found_doc:
+            compact = digits_only(raw)
+            if 11 <= len(compact) <= 14:
+                found_doc = format_doc(compact)
         return {"cliente_doc": found_doc} if found_doc else {}
 
     no_label = strip_known_label(raw)
@@ -328,18 +332,33 @@ class QuoteBuilder:
     def fetch_cnpj_data(self, cnpj: str) -> Dict[str, str]:
         digits = digits_only(cnpj)
         if len(digits) != 14:
+            print(f"[CNPJ API] Ignorado - {len(digits)} dígitos (precisa de exatamente 14): {cnpj}")
             return {}
+
         headers = {"User-Agent": "Mozilla/5.0"}
-        for url in CNPJ_ENDPOINTS:
+        print(f"[CNPJ API] Iniciando consulta para {digits} ({cnpj})")
+
+        for idx, url in enumerate(CNPJ_ENDPOINTS, 1):
             try:
-                response = requests.get(url.format(cnpj=digits), headers=headers, timeout=15)
+                response = requests.get(url.format(cnpj=digits), headers=headers, timeout=12)
+                print(f"[CNPJ API] Tentativa {idx}/{len(CNPJ_ENDPOINTS)} → {url} | Status: {response.status_code}")
+
                 if response.status_code != 200:
                     continue
+
                 normalized = self.normalize_cnpj_payload(response.json())
                 if normalized.get("nome") or normalized.get("endereco"):
+                    print(f"[CNPJ API] SUCESSO na tentativa {idx} - Nome: {normalized.get('nome')}")
                     return normalized
-            except Exception:
-                continue
+
+            except requests.exceptions.Timeout:
+                print(f"[CNPJ API] Timeout na tentativa {idx}: {url}")
+            except requests.exceptions.ConnectionError:
+                print(f"[CNPJ API] Erro de conexão na tentativa {idx}: {url}")
+            except Exception as e:
+                print(f"[CNPJ API] Erro desconhecido na tentativa {idx}: {url} → {type(e).__name__}: {str(e)}")
+
+        print(f"[CNPJ API] FALHA TOTAL - Todas as {len(CNPJ_ENDPOINTS)} APIs falharam para CNPJ {digits}")
         return {}
 
     def normalize_cnpj_payload(self, data: Dict[str, Any]) -> Dict[str, str]:
@@ -404,10 +423,7 @@ class QuoteBuilder:
     def parse_text(self, text: str) -> Dict[str, Any]:
         lines = preprocess_text(text)
 
-        # === FILTRO DE CABEÇALHOS/METADADOS (PRIORIDADE 1) ===
-        # Ignora linhas como "Orçamento nº XXXX", "Cotação nº XXXX" ou similares
-        # para resolver o bug crítico onde viravam nome do cliente.
-        # Colocado no INÍCIO da função conforme solicitado.
+        # Filtro de cabeçalhos (mantido)
         header_patterns = [
             r"orçamento\s*n[º°]?\s*\d",
             r"orcamento\s*n[º°]?\s*\d",
@@ -432,6 +448,7 @@ class QuoteBuilder:
             "valor_negociado": None,
             "prazo_entrega": None,
             "numero_cotacao": None,
+            "numero_orcamento_custom": None,   # NOVO
             "items": [],
             "observacoes_adicionais": [],
             "texto_original": text,
@@ -451,6 +468,15 @@ class QuoteBuilder:
                     "produto": normalize_product(m.group("produto"), m.group("medida")),
                     "quantidade": int(m.group("qtd")),
                 })
+                continue
+
+            # === NOVA EXTRAÇÃO: Número do Orçamento customizado ===
+            value = extract_label_value(line, [
+                r"número do orçamento", r"numero do orçamento", r"numero do orcamento",
+                r"nº do orçamento", r"n do orçamento", r"orçamento nº", r"orcamento nº"
+            ])
+            if value is not None:
+                data["numero_orcamento_custom"] = value
                 continue
 
             value = extract_label_value(line, [r"frete"])
@@ -525,7 +551,7 @@ class QuoteBuilder:
             _, cleaned = extract_document_from_text(first_line)
             cleaned = re.sub(r"\s*-\s*(cpf|cnpj)\b.*$", "", cleaned, flags=re.IGNORECASE).strip()
             if cleaned and not looks_like_address(cleaned) and not looks_like_product_line(cleaned):
-                if digits_only(cleaned) != cleaned.replace(" ", ""):
+                if re.search(r'[a-zA-Z]', cleaned, re.IGNORECASE):
                     data["cliente_nome"] = normalize_spaces(cleaned)
 
         data["cliente_doc"] = data["cliente_doc"] or "não informado"
@@ -545,9 +571,22 @@ class QuoteBuilder:
             "valor_negociado": None,
             "prazo_entrega": None,
             "numero_cotacao": None,
+            "numero_orcamento_custom": None,
             "items": [],
             "observacoes_adicionais": [],
         }
+
+        # === LÓGICA DE NÚMERO CUSTOMIZADO ===
+        numero_orcamento_custom = extracted.get("numero_orcamento_custom")
+        if numero_orcamento_custom:
+            digits = digits_only(numero_orcamento_custom)
+            if digits:
+                numero_orcamento = int(digits)
+                print(f"[QUOTE] Número do Orçamento FORÇADO pelo input: {numero_orcamento}")
+            else:
+                numero_orcamento = self.next_number()
+        else:
+            numero_orcamento = self.next_number()
 
         doc_final = payload.get("cliente_doc") or extracted.get("cliente_doc") or "não informado"
         cnpj_data = self.fetch_cnpj_data(doc_final) if len(digits_only(doc_final)) == 14 else {}
@@ -611,7 +650,6 @@ class QuoteBuilder:
             })
 
         total_geral = subtotal - desconto + frete
-        numero_orcamento = self.next_number()
 
         observacoes: List[str] = []
         if entrega != "não informado":
